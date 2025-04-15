@@ -67,3 +67,106 @@ ApiClient.interceptors.response.use(
   }
 );
 ```
+
+## Refresh token trong interceptor
+
+```ts
+import axios from "axios";
+
+const setTokens = (accessToken: string, refreshToken: string) => {
+  localStorage.setItem("accessToken", accessToken);
+  localStorage.setItem("refreshToken", refreshToken);
+};
+
+const getAccessToken = () => localStorage.getItem("accessToken");
+const getRefreshToken = () => localStorage.getItem("refreshToken");
+const clearTokens = () => {
+  localStorage.removeItem("accessToken");
+  localStorage.removeItem("refreshToken");
+};
+
+const axiosInstance = axios.create({
+  baseURL: "https://your-api.com/api",
+});
+
+// Biến lưu trữ trạng thái làm mới token
+let isRefreshing: boolean = false;
+let refreshSubscribers: ((newToken: string | null) => void)[] = [];
+
+// Hàm đăng ký lại yêu cầu khi token đang được làm mới
+const onRefreshed = (newToken: string) => {
+  refreshSubscribers.forEach((callback) => callback(newToken));
+  refreshSubscribers = [];
+};
+
+axiosInstance.interceptors.request.use(
+  (config) => {
+    const accessToken = getAccessToken();
+    if (accessToken) {
+      config.headers["Authorization"] = `Bearer ${accessToken}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+axiosInstance.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+
+    // Nếu nhận 401 và chưa thử refresh token thì xử lý
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          refreshSubscribers.push((newToken: string | null) => {
+            if (newToken) {
+              originalRequest.headers["Authorization"] = `Bearer ${newToken}`;
+              resolve(axiosInstance(originalRequest));
+            } else {
+              reject(error);
+            }
+          });
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        const refreshToken = getRefreshToken();
+        const { data: responseData } = await axios.post(
+          "https://your-api.com/api/auth/refresh",
+          {
+            refreshToken,
+          }
+        );
+
+        const { accessToken: newAccessToken, refreshToken: newRefreshToken } =
+          responseData;
+        setTokens(newAccessToken, newRefreshToken);
+        axiosInstance.defaults.headers[
+          "Authorization"
+        ] = `Bearer ${newAccessToken}`;
+        originalRequest.headers["Authorization"] = `Bearer ${newAccessToken}`;
+        onRefreshed(newAccessToken);
+
+        return axiosInstance(originalRequest);
+      } catch (refreshError) {
+        // ❌ Nếu refresh token cũng không hợp lệ, từ chối tất cả request trong hàng đợi
+        refreshSubscribers.forEach((callback) => callback(null));
+        refreshSubscribers = [];
+
+        clearTokens();
+        window.location.href = "/login";
+
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
+      }
+    }
+
+    return Promise.reject(error);
+  }
+);
+```
